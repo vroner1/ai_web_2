@@ -32,6 +32,7 @@ class Message(BaseModel):
 
 
 class ChatRequest(BaseModel):
+    session_id: int = Field(ge=1)
     messages: list[Message]
     temperature: float = Field(default=0.8, le=2.0, ge=0.0)
     max_tokens: int = Field(default=100, le=10000, ge=10)
@@ -103,6 +104,25 @@ class APIKeyCreatedResponse(APIKeyResponse):
     token: str
 
 
+class ChatSessionCreateRequest(BaseModel):
+    title: str = Field(default="New chat", min_length=1, max_length=120)
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Session title should not be empty.")
+        return cleaned
+
+
+class ChatSessionResponse(APIResponseModel):
+    id: int
+    title: str
+    user_id: Optional[uuid.UUID]
+    created_at: datetime
+
+
 class ChatHistoryResponse(APIResponseModel):
     id: int
     user_prompt: str
@@ -114,12 +134,14 @@ class ChatHistoryResponse(APIResponseModel):
     response_metadata: dict[str, object]
     user_id: Optional[uuid.UUID]
     api_key_id: Optional[int]
+    session_id: int
     created_at: datetime
 
 
 class ChatResponse(BaseModel):
     id: int
     user_id: uuid.UUID
+    session_id: int
     response: str
     temperature: float
     max_tokens: int

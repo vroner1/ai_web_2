@@ -10,6 +10,8 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.database import Base
 
+DEFAULT_CHAT_SESSION_TITLE = "New chat"
+
 
 class User(Base):
     __tablename__ = "user"
@@ -38,10 +40,52 @@ class User(Base):
         lazy="selectin",
     )
 
-    chat_history: Mapped[list["ChatHistory"]] = relationship(
+    chat_sessions: Mapped[list["ChatSession"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
         lazy="selectin",
+    )
+
+    chat_history: Mapped[list["ChatHistory"]] = relationship(
+        back_populates="user",
+        lazy="selectin",
+    )
+
+
+class ChatSession(Base):
+    __tablename__ = "chat_session"
+
+    id: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=True, comment="Primary key."
+    )
+
+    title: Mapped[str] = mapped_column(
+        String(120),
+        nullable=False,
+        default=DEFAULT_CHAT_SESSION_TITLE,
+        comment="Human-readable session title.",
+    )
+
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(),
+        ForeignKey("user.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False),
+        default=datetime.utcnow,
+        index=True,
+        comment="Chat session creation date.",
+    )
+
+    user: Mapped[Optional["User"]] = relationship(back_populates="chat_sessions")
+
+    chat_history: Mapped[list["ChatHistory"]] = relationship(
+        back_populates="chat_session",
+        lazy="selectin",
+        order_by="ChatHistory.created_at",
     )
 
 
@@ -94,6 +138,13 @@ class ChatHistory(Base):
         index=True,
     )
 
+    session_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("chat_session.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False),
         default=datetime.utcnow,
@@ -103,6 +154,7 @@ class ChatHistory(Base):
 
     user: Mapped[Optional["User"]] = relationship(back_populates="chat_history")
     api_key: Mapped[Optional["APIKey"]] = relationship(back_populates="chat_history")
+    chat_session: Mapped["ChatSession"] = relationship(back_populates="chat_history")
 
 
 class APIKey(Base):
