@@ -4,14 +4,14 @@ import time
 from contextlib import asynccontextmanager
 from logging.config import dictConfig
 from pathlib import Path
-from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import get_settings
-from app.ml_model.ml_model import MockLLM
+from app.ml_model.base import BaseLLM
+from app.ml_model.factory import build_llm
 from app.routers.router import router
 
 settings = get_settings()
@@ -23,12 +23,12 @@ with (Path(__file__).resolve().parent.parent / "log_config.json").open(
 
 logger = logging.getLogger(__name__)
 
-ml_model_state: dict[str, Any] = {}
+ml_model_state: dict[str, BaseLLM] = {}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    ml_model_state["ml_model"] = MockLLM()
+    ml_model_state["ml_model"] = build_llm(settings)
     logger.info("Server is ready to accept connections.")
     yield
     ml_model_state.clear()

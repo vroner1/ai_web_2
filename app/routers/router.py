@@ -11,6 +11,7 @@ from fastapi import (
     Depends,
     HTTPException,
     Query,
+    Request,
     Security,
     status,
 )
@@ -21,10 +22,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-import app.main as main_app
 from app.config import get_settings
 from app.database.database import get_db
-from app.ml_model.ml_model import MockLLM
+from app.ml_model.base import BaseLLM
 from app.models.models import (
     APIKey,
     ChatHistory,
@@ -54,8 +54,30 @@ api_key_header = APIKeyHeader(name=settings.API_KEY_HEADER_NAME, auto_error=Fals
 bearer_security = HTTPBearer(auto_error=False)
 
 
-def get_llm() -> MockLLM:
-    return main_app.ml_model_state["ml_model"]
+def get_llm(request: Request) -> BaseLLM:
+    return request.app.state.ml_model
+
+
+def raise_provider_http_error(exc: Exception) -> None:
+    provider_status_code = getattr(exc, "status_code", None)
+    provider_payload = getattr(exc, "payload", None)
+
+    status_code = (
+        provider_status_code
+        if provider_status_code in {429, 503}
+        else status.HTTP_502_BAD_GATEWAY
+    )
+
+    detail: dict[str, object] = {"message": str(exc)}
+    if provider_status_code is not None:
+        detail["provider_status_code"] = provider_status_code
+    if provider_payload is not None:
+        detail["provider_payload"] = provider_payload
+
+    raise HTTPException(
+        status_code=status_code,
+        detail=detail,
+    ) from exc
 
 
 async def get_current_api_key(
@@ -157,14 +179,22 @@ def schedule_chat_audit(
 
 
 def build_chat_metadata(
-    request: ChatRequest, model: MockLLM, *, streamed: bool
+    request: ChatRequest,
+    model: BaseLLM,
+    *,
+    streamed: bool,
+    extra: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    return {
+    metadata: dict[str, object] = {
+        "provider": model.provider_name,
         "model_name": model.model_name,
         "message_count": request.message_count,
         "streamed": streamed,
         "session_id": request.session_id,
     }
+    if extra:
+        metadata.update(extra)
+    return metadata
 
 
 def derive_session_title(user_prompt: str) -> str:
@@ -173,11 +203,14 @@ def derive_session_title(user_prompt: str) -> str:
 
 
 @router.get("/health", response_model=HealthResponse, tags=["system"])
-async def health(db: AsyncSession = Depends(get_db)) -> HealthResponse:
+async def health(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> HealthResponse:
     await db.execute(text("SELECT 1"))
     return HealthResponse(
         status="ok",
-        model_loaded="ml_model" in main_app.ml_model_state,
+        model_loaded=hasattr(request.app.state, "ml_model"),
         database="ok",
     )
 
@@ -358,7 +391,7 @@ async def chat(
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     api_key: APIKey = Depends(get_current_api_key),
-    model: MockLLM = Depends(get_llm),
+    model: BaseLLM = Depends(get_llm),
 ) -> ChatResponse:
     chat_session = await get_chat_session_or_404(request.session_id, db)
     ensure_session_access(chat_session, api_key.owner_id)
@@ -366,28 +399,45 @@ async def chat(
     user_prompt = request.messages[-1].message
 
     if len(user_prompt) > settings.MAX_PROMPT_LENGTH:
-        raise main_app.ContextLengthExceeded(settings.MAX_PROMPT_LENGTH)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Input message is greater than {settings.MAX_PROMPT_LENGTH} symbols.",
+        )
 
-    response_text = await model.generate(
-        prompt=user_prompt,
-        temperature=request.temperature,
-        max_tokens=request.max_tokens,
-    )
+    payload_messages = [message.model_dump() for message in request.messages]
+
+    try:
+        result = await model.generate(
+            messages=payload_messages,
+            temperature=request.temperature,
+            max_tokens=request.max_tokens,
+        )
+    except Exception as exc:
+        if hasattr(exc, "status_code"):
+            raise_provider_http_error(exc)
+        raise
 
     chat_entry = ChatHistory(
         user_id=api_key.owner_id,
         api_key_id=api_key.id,
         session_id=chat_session.id,
-        messages=[message.model_dump() for message in request.messages],
+        messages=payload_messages,
         user_prompt=user_prompt,
-        assistant_prompt=response_text,
+        assistant_prompt=result.text,
         temperature=request.temperature,
         max_tokens=request.max_tokens,
         streamed=False,
-        response_metadata=build_chat_metadata(request, model, streamed=False),
+        response_metadata=build_chat_metadata(
+            request,
+            model,
+            streamed=False,
+            extra=result.metadata,
+        ),
     )
+
     if chat_session.title == DEFAULT_CHAT_SESSION_TITLE:
         chat_session.title = derive_session_title(user_prompt)
+
     db.add(chat_entry)
     await db.commit()
     await db.refresh(chat_entry)
@@ -403,10 +453,10 @@ async def chat(
         id=chat_entry.id,
         user_id=api_key.owner_id,
         session_id=chat_session.id,
-        response=response_text,
+        response=result.text,
         temperature=chat_entry.temperature,
         max_tokens=chat_entry.max_tokens,
-        model_name=model.model_name,
+        model_name=result.model_name,
         created_at=chat_entry.created_at,
     )
 
@@ -416,7 +466,7 @@ async def chat_streaming(
     request: ChatRequest,
     db: AsyncSession = Depends(get_db),
     api_key: APIKey = Depends(get_current_api_key),
-    model: MockLLM = Depends(get_llm),
+    model: BaseLLM = Depends(get_llm),
 ) -> StreamingResponse:
     chat_session = await get_chat_session_or_404(request.session_id, db)
     ensure_session_access(chat_session, api_key.owner_id)
@@ -424,32 +474,56 @@ async def chat_streaming(
     user_prompt = request.messages[-1].message
 
     if len(user_prompt) > settings.MAX_PROMPT_LENGTH:
-        raise main_app.ContextLengthExceeded(settings.MAX_PROMPT_LENGTH)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Input message is greater than {settings.MAX_PROMPT_LENGTH} symbols.",
+        )
+
+    payload_messages = [message.model_dump() for message in request.messages]
 
     async def stream_response():
         collected_tokens: list[str] = []
-        async for token in model.generate_stream(
-            prompt=user_prompt,
-            temperature=request.temperature,
-            max_tokens=request.max_tokens,
-        ):
-            collected_tokens.append(token)
-            yield token
+        final_metadata: dict[str, object] = {}
+
+        try:
+            async for event in model.generate_stream(
+                messages=payload_messages,
+                temperature=request.temperature,
+                max_tokens=request.max_tokens,
+            ):
+                if event.token:
+                    collected_tokens.append(event.token)
+                    yield event.token
+
+                if event.done:
+                    final_metadata = event.metadata
+        except Exception as exc:
+            if hasattr(exc, "status_code"):
+                logger.exception("Streaming provider error: %s", exc)
+                raise_provider_http_error(exc)
+            raise
 
         chat_entry = ChatHistory(
             user_id=api_key.owner_id,
             api_key_id=api_key.id,
             session_id=chat_session.id,
-            messages=[message.model_dump() for message in request.messages],
+            messages=payload_messages,
             user_prompt=user_prompt,
             assistant_prompt="".join(collected_tokens).strip(),
             temperature=request.temperature,
             max_tokens=request.max_tokens,
             streamed=True,
-            response_metadata=build_chat_metadata(request, model, streamed=True),
+            response_metadata=build_chat_metadata(
+                request,
+                model,
+                streamed=True,
+                extra=final_metadata,
+            ),
         )
+
         if chat_session.title == DEFAULT_CHAT_SESSION_TITLE:
             chat_session.title = derive_session_title(user_prompt)
+
         db.add(chat_entry)
         await db.commit()
         await db.refresh(chat_entry)

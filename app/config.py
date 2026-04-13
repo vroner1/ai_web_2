@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -24,8 +25,18 @@ class Settings(BaseSettings):
         ]
     )
 
+    LLM_MODE: Literal["mock", "real"] = Field(default="mock")
+    LLM_PROVIDER: str = Field(default="openrouter")
+    LLM_API_KEY: str | None = Field(default=None)
+    LLM_MODEL: str = Field(default="openrouter/free")
+    LLM_BASE_URL: str | None = Field(default="https://openrouter.ai/api/v1")
+    LLM_TIMEOUT_SECONDS: int = Field(default=60, ge=1)
+
+
+
 
 @lru_cache
 def get_settings() -> Settings:
     """Returns app settings instance."""
     return Settings()
+
