@@ -32,12 +32,13 @@ LLM_MODE=mock
 
 Для real-режима:
 
-```env
 LLM_MODE=real
 LLM_PROVIDER=openrouter
 LLM_API_KEY=<your_key>
 LLM_MODEL=openrouter/free
 LLM_BASE_URL=https://openrouter.ai/api/v1
+
+```
 
 Эндпоинты POST /chat и POST /chat/stream работают в обоих режимах и сохраняют историю запроса, включая текст ответа, признак streaming/non-streaming, имя модели и метаданные провайдера.
 
