@@ -30,8 +30,11 @@ uv run uvicorn app.main:app --reload --port <..порт..>
 ```env
 LLM_MODE=mock
 
+```
+
 Для real-режима:
 
+```env
 LLM_MODE=real
 LLM_PROVIDER=openrouter
 LLM_API_KEY=<your_key>
